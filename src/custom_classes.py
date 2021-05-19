@@ -12,6 +12,31 @@ from geometry_msgs.msg import (
     Quaternion,
 )
 from collections import deque
+from itertools import product, permutations
+from operator import itemgetter
+from pathlib import Path
+from typing import Dict
+
+from mtp.argument import fetch_arguments
+from mtp.config import get_config_list
+from mtp.data.dataset import TrajectoryDataset
+from mtp.data.trajectory_storage import fetch_trajectory_storage
+from mtp.networks import fetch_model_iterator
+from mtp.train import Trainer
+
+def onehot_from_index(index_vector: torch.Tensor, num_cls: int):
+    onehot = torch.zeros((index_vector.numel(), num_cls), dtype=torch.float32, device=index_vector.device)
+    for i in range(index_vector.numel()):
+        onehot[i, index_vector[i]] = 1.
+    return onehot
+
+def fetch_winding_constraints(num_agent: int):
+    edge_index = list(permutations(range(num_agent), 2))
+    sorted_edge_index = np.array([sorted(p) for p in edge_index])
+    unique_edge_index = np.unique(sorted_edge_index, axis=0)
+    constraints = [tuple(int(v) for v in np.where((sorted_edge_index == unique_edge_index[r]).all(axis=1))[0])
+                   for r in range(unique_edge_index.shape[0])]
+    return constraints
 
 class World:
 
@@ -56,12 +81,12 @@ class GraphNetPredictor:
         self.inputs = []
         self.prev_pred = None
         self.prev_probs = None
-        fig = plt.figure()
-        # ax = plt.gca()
-        ax = p3.Axes3D(fig)
-        ax.view_init(90, -90)
-        ax.set_xlim((200, 300))
-        ax.set_ylim((-200, -300))
+        # fig = plt.figure()
+        # # ax = plt.gca()
+        # ax = p3.Axes3D(fig)
+        # ax.view_init(90, -90)
+        # ax.set_xlim((200, 300))
+        # ax.set_ylim((-200, -300))
         # # ax.set_zlim((0, 20))
         # plt.gcf().canvas.mpl_connect(
         #     'key_release_event',
@@ -130,8 +155,8 @@ class GraphNetPredictor:
                 self.trainer.device)  # Shape: [B x n x rollout_num x d]
             tar_winding = torch.zeros((self.B, self.N * (self.N - 1))).to(
                 self.trainer.device)  # B, E
-            src_index_tensor = self.src_index_tensor.to(
-                self.trainer.device)
+            # src_index_tensor = self.src_index_tensor.to(
+            #     self.trainer.device)
             tar_goal = torch.zeros((self.B, self.N)).to(
                 self.trainer.device)  # B, n
             winding_onehot = torch.zeros((self.B, self.N * (self.N - 1), 2)).to(
@@ -155,22 +180,22 @@ class GraphNetPredictor:
                     prd_goal = row[:num_goal]
                     prd_goal[0] = 1
                     prd_winding = row[num_goal:]
-                    # skip if the goal position label is same with the starting position label
-                    valid = True
-                    if int(prd_goal[0]) != int(self.global_intent[1]):
-                        valid = False
-                    # # if int(prd_goal[1]) != int(self.global_intent[3]):
-                    # #     continue
-                    for g, s in zip(prd_goal, src_index_tensor[r, :]):
-                        if g.item() == s.item():
-                            valid = False
+                    # # skip if the goal position label is same with the starting position label
+                    # valid = True
+                    # if int(prd_goal[0]) != int(self.global_intent[1]):
+                    #     valid = False
+                    # # # if int(prd_goal[1]) != int(self.global_intent[3]):
+                    # # #     continue
+                    # for g, s in zip(prd_goal, src_index_tensor[r, :]):
+                    #     if g.item() == s.item():
+                    #         valid = False
 
-                    # skip if the winding numbers are inconsistent
-                    for i1, i2 in self.winding_constraints:
-                        if prd_winding[i1] != prd_winding[i2]:
-                            valid = False
-                    if not valid:
-                        continue
+                    # # skip if the winding numbers are inconsistent
+                    # for i1, i2 in self.winding_constraints:
+                    #     if prd_winding[i1] != prd_winding[i2]:
+                    #         valid = False
+                    # if not valid:
+                    #     continue
 
                     prd_goal_onehot = onehot_from_index(prd_goal, 4).unsqueeze(0)
                     prd_winding_onehot = onehot_from_index(prd_winding, 2).unsqueeze(0)
