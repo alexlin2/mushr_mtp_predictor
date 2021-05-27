@@ -13,16 +13,9 @@ from geometry_msgs.msg import (
 )
 from collections import deque
 from itertools import product, permutations
-from operator import itemgetter
 from pathlib import Path
-from typing import Dict
 
-from mtp.argument import fetch_arguments
-from mtp.config import get_config_list
-from mtp.data.dataset import TrajectoryDataset
-from mtp.data.trajectory_storage import fetch_trajectory_storage
-from mtp.networks import fetch_model_iterator
-from mtp.train import Trainer
+from scipy.spatial.transform import Rotation as R
 
 def onehot_from_index(index_vector: torch.Tensor, num_cls: int):
     onehot = torch.zeros((index_vector.numel(), num_cls), dtype=torch.float32, device=index_vector.device)
@@ -41,9 +34,16 @@ def fetch_winding_constraints(num_agent: int):
 class World:
 
     def __init__(self, car_names, N, T, d):
+        self.dtype = torch.FloatTensor
         self.car_names = car_names
         self.past_hist = np.zeros((N,T,d))
+        self.past_poses = []  
+        self.ego_pose = self.dtype([0,0,0])
+        assert T > 5 
         assert len(car_names) == N
+
+        for i in range(N):
+            self.past_poses.append(deque(maxlen=5))
 
     def setup_pub_sub(self):
         for car in self.car_names:
@@ -57,10 +57,25 @@ class World:
 
     def callback_populate_hist(self, msg, car_name):
         player_index = self.car_names.index(car_name)
-        past_hist = self.past_hist[player_index]
+        self.past_poses[player_index].appendleft(msg)
+        prev_poses = self.past_poses[player_index]
 
-        xydxdy = msg.pose.position.x, msg.pose.position.y,\
-                 msg.pose.position.x - past_hist[0][0],  msg.pose.position.y - past_hist[0][1]
+        if player_index == 0:
+            q = msg.pose.orientation
+            r = R.from_quat([q.x, q.y, q.z, q.w])
+            yaw = r.as_euler('zyx')[0]
+            self.ego_pose = self.dtype([msg.pose.position.x, msg.pose.position.y, yaw])
+
+        if len(prev_poses) == 5:
+            dx = prev_poses[0].pose.position.x - prev_poses[-1].pose.position.x
+            dy = prev_poses[0].pose.position.y - prev_poses[-1].pose.position.y
+            dt = (prev_poses[0].header.stamp - prev_poses[-1].header.stamp).to_sec()
+        else:
+            dx = 0.0
+            dy = 0.0
+            dt = 1.0
+
+        xydxdy = msg.pose.position.x, msg.pose.position.y, dx/dt, dy/dt
 
         prev_hist = np.copy(self.past_hist[player_index])
         prev_hist[1:] = prev_hist[:-1]
@@ -119,20 +134,6 @@ class GraphNetPredictor:
         curr_state = torch.from_numpy(curr_state).float().to(self.trainer.device)
         return curr_state
 
-    def stop(self):
-        plt.savefig("rollouts.png")
-        plt.clf()
-        if len(self.inputs) > 0:
-            output = torch.stack(self.inputs)
-            torch.save(output, "./inputs.pt")
-        fig = plt.figure()
-        ax = p3.Axes3D(fig)
-        # ax = plt.gca()
-        ax.view_init(90, -90)
-        ax.set_xlim((200, 300))
-        ax.set_ylim((-200, -300))
-        # ax.set_zlim((0, 20))
-        self.prev_pred = None
 
     def predict(self, world):
         threshold = 0.0
@@ -234,7 +235,7 @@ class GraphNetPredictor:
                         dx, dy = output_prd[i, k, :, 2], output_prd[i, k, :, 3]
                         output_prd[i, k, :, 3] = np.sqrt(output_prd[i, k, :, 2] ** 2 + output_prd[i, k, :, 3] ** 2) / (
                             0.1)
-                        output_prd[i, k, :, 2] = (-(np.arctan2(dy, dx) * 180 / np.pi) + 360.) % 360.
+                        output_prd[i, k, :, 2] = np.arctan2(dy, dx)
                 self.prev_pred = output_prd
                 self.prev_probs = probs
                 return output_prd, probs
@@ -242,50 +243,3 @@ class GraphNetPredictor:
                 return self.prev_pred, self.prev_probs
 
 
-'''
-
-class World:
-
-    def __init__(self, car_names, N, T, d):
-        self.car_names = car_names
-        self.past_hist = np.zeros((N,T,d))
-        self.past_poses = []  
-        assert T > 5 
-        assert len(car_names) == N
-
-        for i in range(N):
-            self.past_poses.append(deque(maxlen=5))
-
-    def setup_pub_sub(self):
-        for car in self.car_names:
-            rospy.Subscriber(
-                "/" + car + "/" + "car_pose",
-                PoseStamped,
-                self.callback_populate_hist,
-                callback_args=car,
-                queue_size=10,
-            )
-
-    def callback_populate_hist(self, msg, car_name):
-        player_index = self.car_names.index(car_name)
-        self.past_poses[player_index].appendleft(msg)
-        prev_poses = self.past_poses[player_index]
-        past_hist = self.past_hist[player_index]
-
-        if len(prev_poses) == 5:
-            dx = prev_poses[0].pose.position.x - prev_poses[-1].pose.position.x
-            dy = prev_poses[0].pose.position.y - prev_poses[-1].pose.position.y
-            dt = (prev_poses[0].header.stamp - prev_poses[-1].header.stamp).to_sec()
-        else:
-            dx = 0.0
-            dy = 0.0
-            dt = 1.0
-
-        xydxdy = msg.pose.position.x, msg.pose.position.y, dx/dt, dy/dt
-
-        prev_hist = np.copy(self.past_hist[player_index])
-        prev_hist[1:] = prev_hist[:-1]
-        prev_hist[0] = np.array(xydxdy)
-        self.past_hist[player_index] = prev_hist
-
-'''

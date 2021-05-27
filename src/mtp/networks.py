@@ -11,7 +11,7 @@ from mtp.argument import Argument
 from mtp.config import LayerConfig, ModelType
 from mtp.models.graph_net import WindingGraphNet, TrajectoryGraphNet
 from mtp.utils.logging import get_logger
-from utils.timing import timing
+from utils2.timing import timing
 
 dont_send_to_device = []
 
