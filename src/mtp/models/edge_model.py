@@ -1,7 +1,8 @@
 import torch
 from torch.nn import Sequential as Seq, Linear, LayerNorm, ReLU, GRU, Module
+from torch import Tensor
 
-from ..models.model_base import reparameterize
+from ..models.model_base import reparameterize, batch_reparameterize
 from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -55,8 +56,19 @@ class ProbEdgeModel(EdgeModelBase):
         x = self.mlp_w(z)
         return x, z_mu, z_var
 
-    def fetch_edge_from_latent_variable(self, z_mu, z_var):
-        z = reparameterize(z_mu, z_var)
+    def fetch_edge_from_latent_variable(
+            self,
+            z_mu: Tensor,
+            z_var: Tensor,
+            num_samples: int):
+        """
+        Fetch the estimated edge values from latent variables
+        :param z_mu: mean value, torch.float32, (batch_size * num_agents, dim_latent=20)
+        :param z_var: std value, torch.float32, (batch_size * num_agents, dim_latent=20)
+        :param num_samples: number of target samples
+        :return: edge values, torch.float32, (batch_size * num_agents, num_samples, dim_edge)
+        """
+        z = batch_reparameterize(z_mu, z_var, num_samples)  # (batch_size * num_agents, num_samples, dim_latent)
         return self.mlp_w(z)
 
 

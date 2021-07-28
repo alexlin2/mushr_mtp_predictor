@@ -6,10 +6,12 @@ from time import time
 from typing import Dict, Any, List, Tuple
 
 import torch
+from tensorboardX import SummaryWriter
+from torch import Tensor
 from torch.nn import MSELoss, CrossEntropyLoss
 from torch.nn.utils import clip_grad_value_
 from torch.utils.data import DataLoader
-from tensorboardX import SummaryWriter
+from tqdm import tqdm
 
 from mtp.config import TrainingConfig
 from mtp.networks import GraphNetWrapper
@@ -18,7 +20,9 @@ from mtp.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-def onehot_from_index(index_vector: torch.Tensor, num_cls: int):
+def onehot_from_index(
+        index_vector: Tensor,
+        num_cls: int) -> Tensor:
     onehot = torch.zeros((index_vector.numel(), num_cls), dtype=torch.float32, device=index_vector.device)
     for i in range(index_vector.numel()):
         onehot[i, index_vector[i]] = 1.
@@ -66,6 +70,29 @@ def vae_loss(loss_func, beta, prd_value, tar_value, mu, logvar):
     return bce + beta * kld
 
 
+def prep_data(ref_trajectory, item_index: int, unique_samples, dim_goal: int):
+    """
+    Prepare the data for trajectory prediction from the samples
+    :param ref_trajectory: torch.float32, (batch_size, num_agents, num_ref_frames, dim_states)
+    :param item_index: index in the batch
+    :param unique_samples: torch.float32, (num_unique_samples, num_agents * (dim_goal + dim_winding))
+    :param dim_goal: int, dimension of one-hot goal vector
+    :return:
+        :curr_input: torch.float32, (num_unique_samples, num_agents, num_ref_frames, dim_states)
+        :pred_winding: torch.float32, (num_unique_samples, num_agents, dim_winding)
+        :pred_goal: torch.float32, (num_unique_samples, num_agents, dim_goal)
+    """
+    num_unique_samples = unique_samples.shape[0]
+    num_agents = unique_samples.shape[1]
+    unique_samples = unique_samples.view(num_unique_samples, num_agents, -1)
+    pred_goal = unique_samples[..., :dim_goal]  # (num_unique_samples, num_agents, dim_goal)
+    pred_winding = unique_samples[..., dim_goal:]  # (num_unique_samples, num_agents, dim_winding)
+    curr_input = ref_trajectory[item_index, ...].squeeze().unsqueeze(0). \
+        expand(num_unique_samples, -1, -1,
+               -1)  # (num_unique_samples, num_agents, num_ref_frames, dim_states)
+    return curr_input, pred_winding, pred_goal
+
+
 class Trainer:
     def __init__(
             self,
@@ -90,11 +117,9 @@ class Trainer:
         _dirs = {'train': self.config.train_tb_dir,
                  'test': self.config.test_tb_dir}
         self.tb_writer = {m: SummaryWriter(str(d), flush_secs=self.config.flush_secs) for m, d in _dirs.items()}
-        # self.model_wrapper.load(None)
 
         self.modes = modes
         self.dataloader = dataloader
-        # self.data_iter = None  #{m: iter(self.dataloader[m]) for m in self.modes}
         self.data_iter = {m: iter(self.dataloader[m]) for m in self.modes}
         self.run_every = run_every
         self.finished = False
@@ -159,20 +184,23 @@ class Trainer:
 
     def train(self, train_winding: bool, train_trajectory: bool):
         assert train_winding or train_trajectory
+        logger.info('train mode: {}'.format('winding' if train_winding else 'trajectory'))
         self.initialize_meter_dict()
         end = time()
         self.model_wrapper.train_mode()
 
-        while self.num_iter < self.max_iter and not self.finished:
+        for num_iter in tqdm(range(self.num_iter, self.max_iter)):
+            if self.finished:
+                break
             batch_dict = self.retrieve_data()
             for mode, batch in batch_dict.items():
                 self.model_wrapper.send_batch_to_device(batch)
-                ref_trajectory = batch['ref_trajectory']  # Shape: [B x n x T x d]
-                tar_trajectory = batch['tar_trajectory']  # Shape: [B x n x rollout_num x d]
-                tar_winding_onehot = batch['tar_winding_onehot']  # B, E, 2
-                dst_onehot = batch['dst_onehot'].squeeze()  # B, n, 4
-                tar_winding_index = batch['tar_winding_index']  # B, E
-                dst_index = batch['dst_index']  # B, n
+                ref_trajectory = batch['ref_trajectory']  # (batch_size, num_agents, num_ref_frames, dim_states)
+                tar_trajectory = batch['tar_trajectory']  # (batch_size, num_agents, num_tar_frames, dim_states)
+                tar_winding_onehot = batch['tar_winding_onehot']  # (batch_size, num_edges, dim_winding)
+                dst_onehot = batch['dst_onehot'].squeeze()  # (batch_size, num_agents, dim_goal)
+                tar_winding_index = batch['tar_winding_index']  # (batch_size, num_edges)
+                dst_index = batch['dst_index']  # (batch_size, num_agents)
                 self.meter_dict[mode]['data_time'].update(time() - end)
 
                 total_loss = 0.
@@ -204,20 +232,20 @@ class Trainer:
                 end = time()
 
                 # Record information every x iterations
-                if self.num_iter % self.config.iter_collect == 0:
+                if num_iter % self.config.iter_collect == 0:
                     info = self.fetch_info_from_meter_dict(mode)
-                    self.tb_writer[mode].add_scalar('loss/total', info['total_loss'], self.num_iter)
-                    self.tb_writer[mode].add_scalar('loss/node', info['node_loss'], self.num_iter)
-                    self.tb_writer[mode].add_scalar('loss/edge', info['edge_loss'], self.num_iter)
-                    self.tb_writer[mode].add_scalar('loss/winding', info['winding_loss'], self.num_iter)
-                    self.tb_writer[mode].add_scalar('loss/goal', info['goal_loss'], self.num_iter)
-                    self.tb_writer[mode].add_scalar('time/per_iter', info['batch_time'], self.num_iter)
-                    self.tb_writer[mode].add_scalar('time/data_fetch', info['data_time'], self.num_iter)
+                    self.tb_writer[mode].add_scalar('loss/total', info['total_loss'], num_iter)
+                    self.tb_writer[mode].add_scalar('loss/node', info['node_loss'], num_iter)
+                    self.tb_writer[mode].add_scalar('loss/edge', info['edge_loss'], num_iter)
+                    self.tb_writer[mode].add_scalar('loss/winding', info['winding_loss'], num_iter)
+                    self.tb_writer[mode].add_scalar('loss/goal', info['goal_loss'], num_iter)
+                    self.tb_writer[mode].add_scalar('time/per_iter', info['batch_time'], num_iter)
+                    self.tb_writer[mode].add_scalar('time/data_fetch', info['data_time'], num_iter)
                     for key in self.meter_dict[mode].keys():
                         self.meter_dict[mode][key] = AverageMeter()
                     end = time()
 
-            if self.num_iter % self.config.save_every == 0:
+            if num_iter % self.config.save_every == 0:
                 self.save(train_winding, train_trajectory)
 
             self.num_iter += 1
@@ -228,58 +256,68 @@ class Trainer:
 
         output = []
         with torch.no_grad():
-            for batch in data_loader:
+            t1 = time()
+            for batch_index, batch in tqdm(enumerate(data_loader)):
                 self.model_wrapper.send_batch_to_device(batch)
 
-                ref_trajectory = batch['ref_trajectory']  # Shape: [B x n x T x d]
-                tar_trajectory = batch['tar_trajectory']  # Shape: [B x n x rollout_num x d]
-                tar_winding_onehot = batch['tar_winding_onehot']  # B, E, 2
-                dst_onehot = batch['dst_onehot'].squeeze()  # B, n, 4
-                tar_winding_index = batch['tar_winding_index']  # B, E
-                dst_index = batch['dst_index']  # B, n
+                ref_trajectory = batch[
+                    'ref_trajectory']  # torch.float32, (batch_size, num_agents, num_ref_frames, dim_states)
+                tar_trajectory = batch[
+                    'tar_trajectory']  # torch.float32, (batch_size, num_agents, num_tar_frames, dim_states)
+                tar_winding_index = batch['tar_winding_index']  # torch.int64, (batch_size, num_edges)
+                src_index = batch['src_index']  # torch.int64, (batch_size, num_agents)
+                dst_index = batch['dst_index']  # torch.int64, (batch_size, num_agents)
+                batch_size, num_agents, num_rollout, dim_states = tar_trajectory.shape
+                dim_goal = 4
+                dim_winding = 2
 
-                # ref_trajectory = batch['ref_trajectory']  # Shape: [B x n x T x d]
-                # print('ref_trajectory', ref_trajectory.shape)
-                # tar_trajectory = batch['tar_trajectory']  # Shape: [B x n x rollout_num x d]
-                # tar_winding_index = batch['tar_winding_index'].squeeze()  # B, E
-                # # src_index_tensor = batch['src_index'].squeeze()  # B, n
-                # dst_index = batch['dst_index'].squeeze()  # B, n
-                # # tar_winding_onehot = batch['tar_winding_onehot'].squeeze()  # B, E, 2
-                # # dst_onehot = batch['dst_onehot'].squeeze()  # B, n, 4
-
-                num_goal = dst_index.shape[-1]
-                num_winding = tar_winding_index.shape[-1]
                 tar = torch.cat((dst_index, tar_winding_index), dim=-1)
-                prd_cond = self.model_wrapper.eval_winding(ref_trajectory, tar_winding_index.shape[0], dst_index.shape[0])
-                print(len(prd_cond))
-                # for r, rows in enumerate(prd_cond):
-                #     print(tar[r, :])
-                #     for freq, item in rows:
-                #         print(freq, item)
+                freq_list, sample_list = self.model_wrapper.eval_winding(ref_trajectory, src_index)
 
-                for r, rows in enumerate(prd_cond):
-                    print(r, tar_trajectory.shape, tar_trajectory[r, :].shape)
+                curr_inputs = []
+                pred_windings = []
+                pred_goals = []
+                num_items = []
+                for item_index, (frequencies, unique_samples) in enumerate(zip(freq_list, sample_list)):
+                    curr_input, pred_winding, pred_goal = prep_data(ref_trajectory, item_index, unique_samples,
+                                                                    dim_goal)
+                    num_items.append(curr_input.shape[0])
+                    curr_inputs.append(curr_input)
+                    pred_windings.append(pred_winding)
+                    pred_goals.append(pred_goal)
+                curr_input = torch.cat(curr_inputs, dim=0)
+                pred_winding = torch.cat(pred_windings, dim=0)
+                pred_goal = torch.cat(pred_goals, dim=0)
+                pred_trajectory = self.model_wrapper.eval_trajectory(
+                    curr_state=curr_input,
+                    num_rollout=num_rollout,
+                    winding_onehot=pred_winding,
+                    goal_onehot=pred_goal)
+
+                item_pos = 0
+                for item_index, (frequencies, num_item) in enumerate(zip(freq_list, num_items)):
                     item = {
-                        'src': ref_trajectory[r, :].squeeze(),
-                        'tar': {'winding': tar[r, :], 'trajectory': tar_trajectory[r, :].squeeze()},
-                        'prd': []
+                        'src': ref_trajectory[item_index, :].squeeze(),  # (num_agents, num_ref_frames, dim_states)
+                        'tar': {
+                            'winding': tar[item_index, :],  # (num_agents * 2)
+                            'trajectory': tar_trajectory[item_index, :].squeeze()
+                        },
+                        'prd': {
+                            'frequency': frequencies,  # List[int], (num_unique_samples, )
+                            'winding': pred_winding[item_pos:item_pos + num_item],
+                            # torch.float32, (num_unique_samples, num_agents, dim_winding)
+                            'goal': pred_goal[item_pos:item_pos + num_item],
+                            # torch.float32, (num_unique_samples, num_agents, dim_goal)
+                            'trajectory': pred_trajectory[item_pos:item_pos + num_item],
+                            # torch.float32, (num_unique_samples, num_agents, num_tar_frames, dim_states)
+                        }
                     }
-
-                    for freq, row in rows:
-                        prd_goal = row[:num_goal]
-                        prd_winding = row[num_goal:]
-                        prd_goal_onehot = onehot_from_index(prd_goal, 4).unsqueeze(0)
-                        prd_winding_onehot = onehot_from_index(prd_winding, 2).unsqueeze(0)
-                        curr_input = ref_trajectory[r, ...].squeeze().unsqueeze(0)
-                        B, prd_traj = self.model_wrapper.eval_trajectory(
-                            curr_input, tar_trajectory.shape[2], prd_winding_onehot, prd_goal_onehot)
-                        item['prd'].append({
-                            'frequency': freq,
-                            'winding': row,
-                            'trajectory': prd_traj,
-                        })
                     output.append(item)
-                break
+                    item_pos += num_item
+                # if batch_index >= 4:
+                #     break
+            t2 = time()
+            print('elapsed time {:03d}: {:7.5f}'.format(batch_index, t2 - t1))
         return output
 
     def save(self, train_winding, train_trajectory):
@@ -310,10 +348,8 @@ class Trainer:
                                key=lambda x: int(re.findall(r'([\d]+)', x.stem)[0]))
         trajectory_files = sorted(self.config.model_dir.glob('trajectory*.pt'),
                                   key=lambda x: int(re.findall(r'([\d]+)', x.stem)[0]))
-        # print ("========= Winding files: ", winding_files)
         if winding_files:
             winding_file = winding_files[-1]
-            # winding_file = "/home/rishabh/Downloads/balanced/m-gn_n-2_s-400_b-8.00/winding27000.pt"
             checkpoint_winding = torch.load(str(winding_file), map_location='cpu')
             self.num_iter = max(self.num_iter, checkpoint_winding['iter_num'])
             self.num_epoch = max(self.num_epoch, checkpoint_winding['epoch_num'])
@@ -322,7 +358,6 @@ class Trainer:
 
         if trajectory_files:
             trajectory_file = trajectory_files[-1]
-            # trajectory_file = "/home/rishabh/Downloads/balanced/m-gn_n-2_s-400_b-8.00/trajectory37000.pt"
             checkpoint_trajectory = torch.load(str(trajectory_file), map_location='cpu')
             self.num_iter = max(self.num_iter, checkpoint_trajectory['iter_num'])
             self.num_epoch = max(self.num_epoch, checkpoint_trajectory['epoch_num'])
@@ -331,6 +366,7 @@ class Trainer:
 
         if winding_files or trajectory_files:
             logger.info('Loaded model and optimizer: epoch {}, iteration {}'.format(self.num_epoch, self.num_iter))
+            logger.info('Configuration directory: {}'.format(self.config.model_dir))
 
 
 def dst_combination(src_indices: List[int]):

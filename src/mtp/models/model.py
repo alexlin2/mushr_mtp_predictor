@@ -3,8 +3,8 @@ from typing import Union
 import torch
 from torch.nn import Module, ReLU
 
-from config import LayerConfig, TARGET_WINDOW
-from utils.logging import get_logger
+from mtp.config import LayerConfig, TARGET_WINDOW
+from mtp.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -15,7 +15,7 @@ class GRUModel(Module):
         self.config = config
         self.layer_config = config.layer_configs
 
-        self.num_agent = config.num_agent
+        self.num_agent = config.num_agents
         self.n_dim = self.layer_config['encoder']['n_inc']
         self.input_size = self.n_dim * self.num_agent
         self.hidden_size = 16

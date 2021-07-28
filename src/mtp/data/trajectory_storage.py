@@ -1,3 +1,4 @@
+from math import sqrt
 from pathlib import Path
 from typing import Callable, Any, Tuple
 
@@ -117,7 +118,87 @@ class TrajectoryStorage:
             encode_func=encode_array)
 
 
-def create_storage_from_intermediate_data(num_agents: int):
+def normalize_angle(raw_angle: float) -> float:
+    angle = (raw_angle + np.pi) % np.pi
+    if angle > 0.5 * np.pi:
+        angle -= np.pi
+    return angle
+
+
+def check_local_validity(
+        local_trajectories: np.ndarray,
+        num_ref_frames: int) -> bool:
+    """
+    Check if the local trajectories are valid
+    :param local_trajectories: np.float32, (num_agents, dim_states, window_size)
+    :param num_ref_frames: int
+    :return: bool
+    """
+    len_threshold = 0.5
+    angle_threshold = np.pi / 180 * 3
+
+    num_agents = local_trajectories.shape[0]
+    local_valid_list = []
+    for n in range(num_agents):
+        # check if the reference trajectory is within the intersection area
+        # we set (1.4 x 1.4) area at the center of (1.8, 2.4)
+        ref_trajectory = local_trajectories[n, :2, :num_ref_frames]  # np.float32, (2, num_ref_frames)
+        tar_trajectory = local_trajectories[n, :2, num_ref_frames:]  # np.float32, (2, num_tar_frames)
+        x = ref_trajectory[0, :]
+        y = ref_trajectory[1, :]
+        min_x, max_x = np.min(x), np.max(x)
+        min_y, max_y = np.min(y), np.max(y)
+        if (min_x < 1.1 and max_x > 2.5) or (min_y < 1.7 and max_y > 3.1):
+            local_valid_list.append(False)
+            continue
+
+        # check if the length of reference or target trajectory is too short
+        # if any case is found, completely ignore the sample
+        rfdx = ref_trajectory[0, -1] - ref_trajectory[0, 0]
+        rfdy = ref_trajectory[1, -1] - ref_trajectory[1, 0]
+        tfdx = tar_trajectory[0, -1] - tar_trajectory[0, 0]
+        tfdy = tar_trajectory[1, -1] - tar_trajectory[1, 0]
+        rfl = sqrt(rfdx * rfdx + rfdy * rfdy)
+        tfl = sqrt(tfdx * tfdx + tfdy * tfdy)
+        if rfl < len_threshold or tfl < len_threshold:
+            return False
+
+        # check if the trajectories are too flat
+        dx = ref_trajectory[0, 1:] - ref_trajectory[0, :-1]
+        dy = ref_trajectory[1, 1:] - ref_trajectory[1, :-1]
+        angles = np.arctan2(dy, dx)
+        min_angle = normalize_angle(np.min(angles))
+        max_angle = normalize_angle(np.max(angles))
+        mid_angle = normalize_angle(np.median(angles))
+        if np.abs(max_angle - mid_angle) < angle_threshold or np.abs(mid_angle - min_angle) < angle_threshold:
+            local_valid_list.append(False)
+            continue
+        else:
+            local_valid_list.append(True)
+    return np.any(np.array(local_valid_list))
+
+
+def check_validity(
+        trajectories: np.ndarray,
+        intentions: np.ndarray,
+        num_ref_frames: int = 15) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Check the validity of the trajectory arrays and returns pruned trajectory
+    :param trajectories: np.float32, (num_items, num_agents, dim_states, window_size)
+    :param intentions: np.int64, (num_items, num_agents, dim_intentions)
+    :param num_ref_frames: int,
+    :return:
+        valid_trajectories: np.float32, (num_valid_items, num_agents, dim_states, window_size)
+        valid_intentions: np.int64, (num_valid_items, num_agents, dim_intentions)
+    """
+    num_items = trajectories.shape[0]
+    valid_indices = [i for i in range(num_items) if check_local_validity(trajectories[i, ...], num_ref_frames)]
+    return trajectories[valid_indices], intentions[valid_indices]
+
+
+def create_storage_from_intermediate_data(
+        num_agents: int,
+        num_ref_frames: int = 15):
     path_func_dict = {
         'train': fetch_train_trajectory_storage_path,
         'test': fetch_test_trajectory_storage_path,
@@ -153,9 +234,12 @@ def create_storage_from_intermediate_data(num_agents: int):
                     intentions.append(intention)
                 trajectories = np.stack(trajectories, axis=1).astype(np.float32)  # (#items, num_agents, 4, window_size)
                 intentions = np.stack(intentions, axis=1).astype(np.int64)  # (#items, num_agents, 2)
-                for local_index in range(trajectories.shape[0]):
-                    storage.put_trajectory(storage_index, trajectories[local_index])
-                    storage.put_intention(storage_index, intentions[local_index])
+
+                # refine trajectories and intentions
+                refined_trajectories, refined_intentions = check_validity(trajectories, intentions, num_ref_frames)
+                for local_index in range(refined_trajectories.shape[0]):
+                    storage.put_trajectory(storage_index, refined_trajectories[local_index])
+                    storage.put_intention(storage_index, refined_intentions[local_index])
                     storage_index += 1
 
 

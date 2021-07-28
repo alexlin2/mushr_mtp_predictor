@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import torch
 import rospy 
+from time import time
 from geometry_msgs.msg import (
     Point,
     Pose,
@@ -16,12 +17,15 @@ from itertools import product, permutations
 from pathlib import Path
 
 from scipy.spatial.transform import Rotation as R
+from mtp.train import Trainer
+
 
 def onehot_from_index(index_vector: torch.Tensor, num_cls: int):
     onehot = torch.zeros((index_vector.numel(), num_cls), dtype=torch.float32, device=index_vector.device)
     for i in range(index_vector.numel()):
         onehot[i, index_vector[i]] = 1.
     return onehot
+
 
 def fetch_winding_constraints(num_agent: int):
     edge_index = list(permutations(range(num_agent), 2))
@@ -31,14 +35,40 @@ def fetch_winding_constraints(num_agent: int):
                    for r in range(unique_edge_index.shape[0])]
     return constraints
 
-class World:
+def prep_data(ref_trajectory, item_index: int, unique_samples, dim_goal: int):
+    """
+    Prepare the data for trajectory prediction from the samples
+    :param ref_trajectory: torch.float32, (batch_size, num_agents, num_ref_frames, dim_states)
+    :param item_index: index in the batch
+    :param unique_samples: torch.float32, (num_unique_samples, num_agents * (dim_goal + dim_winding))
+    :param dim_goal: int, dimension of one-hot goal vector
+    :return:
+        :curr_input: torch.float32, (num_unique_samples, num_agents, num_ref_frames, dim_states)
+        :pred_winding: torch.float32, (num_unique_samples, num_agents, dim_winding)
+        :pred_goal: torch.float32, (num_unique_samples, num_agents, dim_goal)
+    """
+    num_unique_samples = unique_samples.shape[0]
+    num_agents = unique_samples.shape[1]
+    unique_samples = unique_samples.view(num_unique_samples, num_agents, -1)
+    pred_goal = unique_samples[..., :dim_goal]  # (num_unique_samples, num_agents, dim_goal)
+    pred_winding = unique_samples[..., dim_goal:]  # (num_unique_samples, num_agents, dim_winding)
+    curr_input = ref_trajectory[item_index, ...].squeeze().unsqueeze(0). \
+        expand(num_unique_samples, -1, -1,
+            -1)  # (num_unique_samples, num_agents, num_ref_frames, dim_states)
+    return curr_input, pred_winding, pred_goal
 
+
+class World:
     def __init__(self, car_names, N, T, d):
+        self.T = T
+        self.d = d
+        self.N = N
         self.dtype = torch.FloatTensor
         self.car_names = car_names
         self.past_hist = np.zeros((N,T,d))
         self.past_poses = []  
         self.ego_pose = self.dtype([0,0,0])
+        self.populated = False
         assert T > 5 
         assert len(car_names) == N
 
@@ -59,6 +89,9 @@ class World:
         player_index = self.car_names.index(car_name)
         self.past_poses[player_index].appendleft(msg)
         prev_poses = self.past_poses[player_index]
+
+        if np.count_nonzero(self.past_hist[player_index]) == self.T * self.d:
+            self.populated = True
 
         if player_index == 0:
             q = msg.pose.orientation
@@ -82,9 +115,12 @@ class World:
         prev_hist[0] = np.array(xydxdy)
         self.past_hist[player_index] = prev_hist
 
+    def get_past_hist(self):
+        return self.past_hist
+
 
 class GraphNetPredictor:
-    def __init__(self, trainer, u_dim, B, N, T, rollout_size, d):
+    def __init__(self, trainer: Trainer, u_dim, B, N, T, rollout_size, d):
         self.trainer = trainer
         self.u_dim = u_dim
         self.B = 1
@@ -109,24 +145,6 @@ class GraphNetPredictor:
         # plt.pause(1.)
         self.eval_root_dir = Path.cwd() / '.gnn/eval'
 
-    def set_src_dst_tensor(self, global_intent):
-        self.global_intent = global_intent
-        src_index_tensor = [3]
-        for i in range(2, len(global_intent), 2):
-            src_index_tensor.append(int(global_intent[i]))
-        src_index_tensor = torch.tensor(
-            [src_index_tensor]).to(self.trainer.device)
-        self.src_index_tensor = src_index_tensor
-        # dst_index = []
-        # for i in range(1, len(global_intent), 2):
-        #     dst_index.append(int(global_intent[i]))
-        # self.dst_index = torch.tensor(
-        #     [dst_index]).to(self.trainer.device)
-        # self.dst_list = self.trainer.generate_dst_combinations(src_index_tensor)
-
-        # self.winding = torch.zeros([self.B, self.N*(self.N-1), 2]).to(self.trainer.device)
-        # self.dest = torch.zeros([self.B, self.N, 4]).to(self.trainer.device)
-
     def get_input(self, world):
         curr_state = np.empty((self.B, self.N, self.T, self.d))
         curr_state[0] = world.past_hist
@@ -135,13 +153,12 @@ class GraphNetPredictor:
         return curr_state
 
 
+
     def predict(self, world):
-        threshold = 0.0
-        output_prd = []
-        probs = []
         output = []
         with torch.no_grad():
 
+            dim_goal = 4
             # ref_trajectory = batch['ref_trajectory']  # Shape: [B x n x T x d]
             # tar_trajectory = batch['tar_trajectory']  # Shape: [B x n x rollout_num x d]
             # tar_winding_onehot = batch['tar_winding_onehot']  # B, E, 2
@@ -150,83 +167,64 @@ class GraphNetPredictor:
             # dst_index = batch['dst_index']  # B, n
 
             curr_state = self.get_input(world)  # Shape: [B x n x T x d]
-            # print (curr_state.size())
-            self.inputs.append(curr_state)
-            next_state = torch.zeros((self.B, self.N, self.rn, self.d)).to(
-                self.trainer.device)  # Shape: [B x n x rollout_num x d]
-            tar_winding = torch.zeros((self.B, self.N * (self.N - 1))).to(
-                self.trainer.device)  # B, E
-            # src_index_tensor = self.src_index_tensor.to(
-            #     self.trainer.device)
-            tar_goal = torch.zeros((self.B, self.N)).to(
-                self.trainer.device)  # B, n
-            winding_onehot = torch.zeros((self.B, self.N * (self.N - 1), 2)).to(
-                self.trainer.device)  # B, E, 2
-            goal_onehot = torch.zeros((self.B, self.N, 4)).to(
-                self.trainer.device)  # B, n, 4
 
-            num_goal = tar_goal.shape[-1]
-            num_winding = tar_winding.shape[-1]
-            tar = torch.cat((tar_goal, tar_winding), dim=-1)
-            prd_cond = self.trainer.model_wrapper.eval_winding(curr_state, tar_winding.shape[0], tar_goal.shape[0])
+            #print(curr_state)
 
-            for r, rows in enumerate(prd_cond):
+            # #self.inputs.append(curr_state)
+            # next_state = torch.zeros((self.B, self.N, self.rn, self.d)).to(
+            #     self.trainer.device)  # Shape: [B x n x rollout_num x d]
+            # tar_winding = torch.zeros((self.B, self.N * (self.N - 1))).to(
+            #     self.trainer.device)  # B, E
+            # # src_index_tensor = self.src_index_tensor.to(
+            # #     self.trainer.device)
+            # tar_goal = torch.zeros((self.B, self.N)).to(
+            #     self.trainer.device)  # B, n
+            # winding_onehot = torch.zeros((self.B, self.N * (self.N - 1), 2)).to(
+            #     self.trainer.device)  # B, E, 2
+            # goal_onehot = torch.zeros((self.B, self.N, 4)).to(
+            #     self.trainer.device)  # B, n, 4
+
+            # num_goal = tar_goal.shape[-1]
+            # num_winding = tar_winding.shape[-1]
+            # tar = torch.cat((tar_goal, tar_winding), dim=-1)
+
+            freq_list, sample_list = self.trainer.model_wrapper.eval_winding(curr_state)
+
+            # for r, rows in enumerate(prd_cond):
+            for item_index, (frequencies, unique_samples) in enumerate(zip(freq_list, sample_list)):
                 item = {
-                    'src': curr_state[r, :].squeeze(),
-                    'tar': {'winding': tar[r, :], 'trajectory': next_state[r, :].squeeze()},
+                    'src': curr_state[item_index, :].squeeze(),
                     'prd': []
                 }
-                # for prd_goal_onehot, prd_winding_onehot, row in zip(dests, winds, rows):
-                for freq, row in rows:
-                    prd_goal = row[:num_goal]
-                    prd_goal[0] = 1
-                    prd_winding = row[num_goal:]
-                    # # skip if the goal position label is same with the starting position label
-                    # valid = True
-                    # if int(prd_goal[0]) != int(self.global_intent[1]):
-                    #     valid = False
-                    # # # if int(prd_goal[1]) != int(self.global_intent[3]):
-                    # # #     continue
-                    # for g, s in zip(prd_goal, src_index_tensor[r, :]):
-                    #     if g.item() == s.item():
-                    #         valid = False
-
-                    # # skip if the winding numbers are inconsistent
-                    # for i1, i2 in self.winding_constraints:
-                    #     if prd_winding[i1] != prd_winding[i2]:
-                    #         valid = False
-                    # if not valid:
-                    #     continue
-
-                    prd_goal_onehot = onehot_from_index(prd_goal, 4).unsqueeze(0)
-                    prd_winding_onehot = onehot_from_index(prd_winding, 2).unsqueeze(0)
-                    # print ("wind: ", prd_winding_onehot)
-                    # print ("dest: ", prd_goal_onehot)
-                    curr_input = curr_state[r, ...].squeeze().unsqueeze(0)
-                    B, prd_traj = self.trainer.model_wrapper.eval_trajectory(
-                        curr_input, next_state.shape[2], prd_winding_onehot, prd_goal_onehot)
-                    if float(freq) / 100 > threshold:
-                        output_prd.append(prd_traj[0].cpu().numpy())
-                        probs.append(float(freq) / 100)
-                    item['prd'].append({
-                        'frequency': freq,
-                        'winding': row,
-                        'trajectory': prd_traj,
-                    })
-                    # print ("TRAJ SIZE: ", prd_traj.size())
+        
+                curr_input, pred_winding, pred_goal = prep_data(curr_state, item_index, unique_samples,
+                                                                    dim_goal)
+        
+                
+                pred_goal = torch.tensor([[[1.,0.,0.,0.],[1.,0.,0.,0.]]]).to(self.trainer.device)
+                pred_winding = torch.tensor([[0.0,1.0],[1.0,0.0]]).to(self.trainer.device)
+                # pred_goal = pred_goal.expand(len(unique_samples), -1, -1).to(self.trainer.device)
+                # pred_goal_onehot = onehot_from_index(pred_goal, 4).unsqueeze(0)
+                # pred_winding_onehot = onehot_from_index(pred_winding, 2).unsqueeze(0)
+    
+                pred_trajectory = self.trainer.model_wrapper.eval_trajectory(
+                        curr_state=curr_input,
+                        num_rollout=self.rn,
+                        winding_onehot=pred_winding,
+                        goal_onehot=pred_goal)  # torch.float32, (num_unique_samples, num_agents, num_tar_frames, dim_states)
+                item['prd'] = {
+                    'frequency': frequencies,  # List[int], (num_unique_samples, )
+                    'winding': pred_winding,  # torch.float32, (num_unique_samples, num_agents, dim_winding)
+                    'goal': pred_goal,  # torch.float32, (num_unique_samples, num_agents, dim_goal)
+                    'trajectory': pred_trajectory,  # torch.float32, (num_unique_samples, num_agents, num_tar_frames, dim_states)
+                }
                 output.append(item)
 
-            # eval_dir = self.eval_root_dir / f'scenario_{scene_id}' / f'behavior_{behavior_id}_{param_id}'
-            # mkdir_if_not_exists(eval_dir)
-            # if len(output) > 0:
-            #     for item_id, item in enumerate(output):
-            #         visualize_single_row(eval_dir, step, item_id, item)
-            # output_prd = output_prd
-            output_prd = np.array(output_prd)
-            # print("PROBS: ", probs)
-            probs = np.array(probs)
-            # current_time = step * dt
-            # t_arr = np.arange(25) * 0.1 + current_time
+            output_prd = np.array([x['prd']['trajectory'].cpu().numpy() for x in output])[0]
+
+            probs = np.array([x['prd']['frequency'] for x in output])[0]
+            #print(output_prd[0,0])
+    
             if len(probs) > 0:
                 for i in range(output_prd.shape[0]):
                     for k in range(self.N):
@@ -241,5 +239,3 @@ class GraphNetPredictor:
                 return output_prd, probs
             else:
                 return self.prev_pred, self.prev_probs
-
-

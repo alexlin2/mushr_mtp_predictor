@@ -2,22 +2,12 @@ import re
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
-from mtp.utils.directory import PathManager, mkdir_if_not_exists
+from mtp.utils.directory import mkdir_if_not_exists, fetch_index_path, fetch_data_path
 from mtp.utils.logging import get_logger
 
 logger = get_logger(__name__)
-_path_manager = PathManager()
-
-FRAME_OFFSET = 20  # 20
-HISTORY_WINDOW = 15  # 15
-TARGET_WINDOW = 25  # 25
-POSE_DIMENSION = 2
-WINDING_DIMENSION = 1
-TRAIN_RATIO = 0.8
-TEST_RATIO = 0.1
-VALID_RATIO = 0.1
 
 
 class PrintableEnum(Enum):
@@ -77,19 +67,19 @@ class DatasetConfig:
 
     @property
     def test_index_path(self):
-        return _path_manager.fetch_index_path(self.num_agent, 'test')
+        return fetch_index_path(self.num_agent, 'test')
 
     @property
     def train_index_path(self):
-        return _path_manager.fetch_index_path(self.num_agent, 'train')
+        return fetch_index_path(self.num_agent, 'train')
 
     @property
     def test_data_path(self):
-        return _path_manager.fetch_data_path(self.num_agent, 'test')
+        return fetch_data_path(self.num_agent, 'test')
 
     @property
     def train_data_path(self):
-        return _path_manager.fetch_data_path(self.num_agent, 'train')
+        return fetch_data_path(self.num_agent, 'train')
 
 
 def generate_encoder_parameter(n_dim, e_dim, u_dim, w_dim, g_dim, inter_size, hidden_size):
@@ -216,7 +206,6 @@ class TrainingConfig:
             max_iter: int,
             save_every: int,
             load: bool,
-            use_winding: bool,
             lr: float,
             beta: float,
             gradient_clip: float,
@@ -226,13 +215,13 @@ class TrainingConfig:
         self.max_iter = max_iter
         self.save_every = save_every
         self.model_dir = mkdir_if_not_exists(model_dir)
+        print(self.model_dir)
         self.train_tb_dir = mkdir_if_not_exists(train_tb_dir)
         self.test_tb_dir = mkdir_if_not_exists(test_tb_dir)
         self.flush_secs = 10
         self.load = load
         self.beta = beta
         self.gradient_clip = gradient_clip
-        self.use_winding = use_winding
         self.custom_index = custom_index
         self._model_info = None
         self._model_indices = []
@@ -277,46 +266,31 @@ class TrainingConfig:
         return None if self._model_info is None else self._model_info['model']
 
 
-def get_config_list(args):
-    dataset_dir = mkdir_if_not_exists(Path.cwd() / '.gnn/data')
-    model_root_dir = mkdir_if_not_exists(Path.cwd() / '.gnn/weights')
-    log_root_dir = mkdir_if_not_exists(Path.cwd() / '.gnn/logs')
-    model_dir = model_root_dir / args.exp_name
-    train_log_dir = log_root_dir / args.exp_name / 'train'
-    test_log_dir = log_root_dir / args.exp_name / 'test'
-
-    eff_num_agent = args.custom_num_agent if args.custom_num_agent >= 0 else args.num_agent
-    dc = DatasetConfig(
-        base_dir=dataset_dir,
-        num_agent=eff_num_agent,
-        num_rollout=args.num_rollout,
-        num_history=args.num_history)
-
+def get_config_list(args) -> Tuple[LayerConfig, TrainingConfig]:
     lc = LayerConfig(
         n_dim=4,
         e_dim=2,
         u_dim=args.u_dim,
         g_dim=4,
         w_dim=2,
-        pred_w_dim=args.pred_w_dim,
-        pred_g_dim=args.pred_g_dim,
+        pred_w_dim=2,
+        pred_g_dim=4,
         winding_inter_size=20,
         winding_hidden_size=30,
-        trajectory_inter_size=20,#30,
-        trajectory_hidden_size=30,#50,
-        num_agent=args.num_agent,
+        trajectory_inter_size=20,
+        trajectory_hidden_size=30,
+        num_agent=args.num_agents,
         device=args.device)
 
     tc = TrainingConfig(
-        model_dir=model_dir,
-        train_tb_dir=train_log_dir,
-        test_tb_dir=test_log_dir,
+        model_dir=args.model_dir,
+        train_tb_dir=args.train_log_dir,
+        test_tb_dir=args.test_log_dir,
         max_iter=args.max_iter,
         save_every=args.save_every,
         load=True,
-        use_winding=args.use_condition,
         lr=args.lr,
         beta=args.beta,
         gradient_clip=args.gradient_clip,
         custom_index=args.custom_index)
-    return dc, lc, tc, model_dir
+    return lc, tc

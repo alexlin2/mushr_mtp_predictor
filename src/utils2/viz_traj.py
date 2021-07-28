@@ -1,5 +1,6 @@
 import matplotlib.cm as cm
 import matplotlib.colors as colors
+from numpy import cosh
 import rospy
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
@@ -9,7 +10,7 @@ import torch
 _traj_pub = rospy.Publisher(
     "debug/viz_rollouts",
     MarkerArray,
-    queue_size=100,
+    queue_size=1,
 )
 
 

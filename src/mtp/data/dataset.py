@@ -3,6 +3,7 @@ from itertools import combinations, permutations
 from typing import List, Tuple
 
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 
 from mtp.data.trajectory_storage import TrajectoryStorage, fetch_trajectory_storage
@@ -86,7 +87,7 @@ class TrajectoryDataset(Dataset):
         winding_values = compute_winding_numbers_vector(ref_trajectory)  # (num_edges, )
         winding_onehot, winding_indices = one_hot_vectors_from_winding_numbers(winding_values)  # (num_edges, 2)
 
-        return {
+        item = {
             'ref_trajectory': ref_trajectory,
             'tar_trajectory': tar_trajectory,
             'tar_winding': winding_values,
@@ -96,6 +97,7 @@ class TrajectoryDataset(Dataset):
             'dst_index': dst_index,
             'dst_onehot': dst_onehot,
         }
+        return {k: torch.tensor(v) for k, v in item.items()}
 
     def __len__(self):
         return len(self.storage)
@@ -104,4 +106,9 @@ class TrajectoryDataset(Dataset):
 if __name__ == '__main__':
     storage = fetch_trajectory_storage(num_agents=2, is_train=True)
     dataset = TrajectoryDataset(storage)
-    print(dataset[0])
+    keys = {'src_index', 'dst_index', 'tar_winding'}
+    for i in range(100):
+        item = dataset[i]
+        indices = np.concatenate((item['src_index'], item['dst_index']), axis=-1)
+        winding = int(item['tar_winding'][0] > 0)
+        print(indices, winding)

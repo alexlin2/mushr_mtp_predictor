@@ -1,7 +1,8 @@
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 from torch.nn import Module
+from torch import Tensor
 
 from mtp.config import LayerConfig
 from mtp.models.edge_model import ProbEdgeModel, UnconditionedRecurrentEdgeModel, \
@@ -71,9 +72,12 @@ class WindingGraphNet(GraphNetBase):
             ProbNodeModel(dc),
             GlobalModel(dc)).to(self.device)
 
-    def fetch_node_and_edge_from_latent_dict(self, latent_dict: Dict[str, torch.Tensor]):
-        w = self.decoder.edge_model.fetch_edge_from_latent_variable(latent_dict['edge_mu'], latent_dict['edge_var'])
-        g = self.decoder.node_model.fetch_node_from_latent_variable(latent_dict['node_mu'], latent_dict['node_var'])
+    def fetch_node_and_edge_from_latent_dict(
+            self,
+            latent_dict: Dict[str, torch.Tensor],
+            num_samples: int) -> Tuple[Tensor, Tensor]:
+        w = self.decoder.edge_model.fetch_edge_from_latent_variable(latent_dict['edge_mu'], latent_dict['edge_var'], num_samples)
+        g = self.decoder.node_model.fetch_node_from_latent_variable(latent_dict['node_mu'], latent_dict['node_var'], num_samples)
         return w, g
 
     def forward(self, g, h):

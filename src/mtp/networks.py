@@ -1,17 +1,17 @@
 from abc import ABC, abstractmethod
+from argparse import Namespace
 from copy import deepcopy
 from itertools import permutations
-from typing import Dict
+from typing import Dict, List, Tuple, Optional
 
-import numpy as np
 import torch
+from torch import Tensor
+from torch.nn.functional import one_hot
 from torch_geometric.data import Data, Batch
 
-from mtp.argument import Argument
 from mtp.config import LayerConfig, ModelType
 from mtp.models.graph_net import WindingGraphNet, TrajectoryGraphNet
 from mtp.utils.logging import get_logger
-from utils2.timing import timing
 
 dont_send_to_device = []
 
@@ -139,7 +139,11 @@ class GraphNetWrapper(NetworkWrapper):
 
         return batch
 
-    def construct_hidden_graph(self, bsize: int, num_agent: int, hidden_size: int):
+    def construct_hidden_graph(
+            self,
+            bsize: int,
+            num_agent: int,
+            hidden_size: int) -> Batch:
         # Compute edge connections
         edge_index = torch.tensor(list(permutations(range(num_agent), 2)), dtype=torch.long)
         edge_index = edge_index.t().contiguous()  # Shape: [2 x E], E = n^2
@@ -224,12 +228,19 @@ class GraphNetWrapper(NetworkWrapper):
         }
         return B, loss_dict, prd_winding, prd_goal
 
-    def eval_trajectory(self, curr_state, num_rollout, winding_onehot, goal_onehot):
+    def eval_trajectory(
+            self,
+            curr_state: Tensor,
+            num_rollout: int,
+            winding_onehot: Tensor,
+            goal_onehot: Tensor) -> Tensor:
         """
-            curr_state: Tensor, input state values (batch_size, num_agents, T, dim_state)
-            num_rollout: int, number of rollouts
-            winding_onehot: Tensor, onehot encoded winding number
-            goal_onehot: Tensor, onehot encoded goal
+        Predicts the trajectory given reference trajectory and conditional mode signals
+        :param curr_state: input state values, torch.float32, (batch_size, num_agents, num_ref_frames, dim_states)
+        :param num_rollout: number of rollouts, int
+        :param winding_onehot: onehot encoded winding number, torch.float32, (batch_size, num_agents, dim_winding)
+        :param goal_onehot: onehot encoded goal index, torch.float32, (batch_size, num_agents, dim_goal)
+        :return: predicted trajectory, torch.float32, (batch_size, num_agents, num_tar_frames, dim_states)
         """
         with torch.no_grad():
             B, n, T, d = curr_state.shape
@@ -245,42 +256,74 @@ class GraphNetWrapper(NetworkWrapper):
                 curr_graph, hidden_trajectory = \
                     self.trajectory_model(curr_graph, hidden_trajectory, winding_onehot, goal_onehot)
                 prd_traj[:, :, i, :] = curr_graph.x.view(B, n, d)
-            return B, prd_traj
+            return prd_traj
 
-    def eval_winding(self, curr_state, w_dim, g_dim):
+    def eval_winding(
+            self,
+            curr_state: Tensor,
+            src_index: Optional[Tensor] = None) -> Tuple[List[List[int]], List[Tensor]]:
+        """
+        Predict the winding numbers in evaluation mode
+        :param curr_state: torch.float32, (batch_size, num_agents, num_ref_frames, dim_states)
+        :param src_index: (optional) starting index, torch.int64, (batch_size, num_agents)
+        :return: tuple of lists of frequencies and sampled one-hot encoded mode values (batch_size, ),
+            frequencies: List[int], (num_unique_samples, )
+            unique_samples: Tensor, torch.float32, (num_unique_samples, num_agents, (dim_goal + dim_winding))
+        """
         with torch.no_grad():
-            B, n, T, d = curr_state.shape
-            wI = self.config.winding_inter
+            batch_size, num_agents, num_ref_frames, dim_states = curr_state.shape
+            wI: int = self.config.winding_inter
 
-            hidden_winding = self.construct_hidden_graph(B, n, wI)
-            for i in range(0, T):
-                curr_graph = self.construct_graph(curr_state[:, :, i, :])
+            hidden_winding = self.construct_hidden_graph(batch_size, num_agents, wI)
+            for time_index in range(num_ref_frames - 5, num_ref_frames):
+                curr_graph = self.construct_graph(curr_state[:, :, time_index, :])
                 hidden_winding, prd_winding, prd_goal, ze_mu, ze_var, zn_mu, zn_var = \
                     self.winding_model(curr_graph, hidden_winding)
             latent_dict = {
-                'node_mu': zn_mu,
-                'node_var': zn_var,
-                'edge_mu': ze_mu,
-                'edge_var': ze_var,
+                'node_mu': zn_mu,  # (batch_size * num_agents, dim_latent=20)
+                'node_var': zn_var,  # (batch_size * num_agents, dim_latent=20)
+                'edge_mu': ze_mu,  # (batch_size * num_agents, dim_latent=20)
+                'edge_var': ze_var,  # (batch_size * num_agents, dim_latent=20)
             }
 
-            pl = []
-            for i in range(100):
-                w_, g_ = self.fetch_node_and_edge_from_latent_dict(latent_dict)
-                w_ = torch.argmax(w_, dim=1).view(w_dim, -1)
-                g_ = torch.argmax(g_, dim=1).view(g_dim, -1)
-                pl.append(torch.cat((g_, w_), dim=-1))
-            pl = torch.stack(pl, dim=0)  # N, num_item, dim
+            num_samples = 100
+            # batched sampling from latent variables (reduced from 60 ms to 10 ms)
+            w_, g_ = self.fetch_node_and_edge_from_latent_dict(latent_dict, num_samples)
+            dim_winding = w_.shape[-1]
+            dim_goal = g_.shape[-1]
+            w_ = one_hot(torch.argmax(w_, dim=-1), num_classes=dim_winding)  # torch.int64, (batch_size * num_agents, num_samples, dim_winding)
+            g_ = one_hot(torch.argmax(g_, dim=-1), num_classes=dim_goal)  # torch.int64, (batch_size * num_agents, num_samples, dim_goal)
+            w_ = w_.view(batch_size, num_agents, num_samples, dim_winding)  # torch.int64, (batch_size, num_agents, num_samples, dim_winding)
+            g_ = g_.view(batch_size, num_agents, num_samples, dim_goal)  # torch.int64, (batch_size, num_agents, num_samples, dim_goal)
+            pl = torch.cat((g_, w_), dim=-1)  # torch.int64, (batch_size, num_agents, num_samples, (dim_goal + dim_winding))
+            pl = pl.permute(0, 2, 1, 3).contiguous()  # torch.int64, (batch_size, num_samples, num_agents, (dim_goal + dim_winding))
+            pl = pl.to(dtype=torch.float32)  # torch.float32, (batch_size, num_samples, num_agents, (dim_goal + dim_winding))
 
-            output = []
-            for i in range(pl.shape[1]):
-                rows = pl[:, i, :]
-                unique_rows = torch.unique(rows, dim=0)
-                # print(rows.shape, unique_rows.shape)
+            frequency_list = []
+            sample_list = []
+            for batch_index in range(batch_size):
+                rows = pl[batch_index, ...]  # (num_samples, num_agents, (dim_goal + dim_winding))
+                rows = rows.view(num_samples, -1)  # (num_samples, num_agents * (dim_goal + dim_winding))
+                # print(batch_index, rows)
+                unique_rows = torch.unique(rows, dim=0)  # (num_unique_samples, num_agents * (dim_goal + dim_winding))
+                num_unique_samples = unique_rows.shape[0]
+
+                # if src_index is not None:
+                #     print('src_index is not None')
+                #     local_src_index = src_index[batch_index, :]  # (num_agents, )
+                #     unique_goals = unique_rows.view(num_unique_samples, num_agents, (dim_goal + dim_winding))[..., :dim_goal]  # (num_unique_samples, num_agents, dim_goal)
+                #     unique_goals = torch.argmax(unique_goals, dim=-1)  # (num_unique_samples, num_agents)
+                #     valid_indices = torch.where((unique_goals != local_src_index).all(dim=1))
+                #     unique_rows = unique_rows[valid_indices]
+                #     num_unique_samples = unique_rows.shape[0]
+
                 freq = [torch.sum((rows == unique_rows[r]).all(dim=1)).item() for r in range(len(unique_rows))]
-                freq_rows = sorted(zip(freq, unique_rows), key=lambda x: x[0], reverse=True)
-                output.append(freq_rows)
-            return output
+                unique_rows = unique_rows.view(num_unique_samples, num_agents, (dim_goal + dim_winding))
+                sorted_index, sorted_freq = zip(*sorted(enumerate(freq), key=lambda x: x[1], reverse=True))
+                unique_rows = unique_rows[list(sorted_index)]
+                frequency_list.append(list(sorted_freq))
+                sample_list.append(unique_rows)
+            return frequency_list, sample_list
 
     def train(self, curr_state, next_state, winding_onehot, goal_onehot, tar_winding, tar_goal, criterion_dict):
         T = curr_state.shape[2]
@@ -334,8 +377,11 @@ class GraphNetWrapper(NetworkWrapper):
         }
         return B, loss_dict, prd_traj, prd_winding, prd_goal, latent_dict
 
-    def fetch_node_and_edge_from_latent_dict(self, latent_dict: Dict[str, torch.Tensor]):
-        return self.winding_model.fetch_node_and_edge_from_latent_dict(latent_dict)
+    def fetch_node_and_edge_from_latent_dict(
+            self,
+            latent_dict: Dict[str, torch.Tensor],
+            num_samples: int):
+        return self.winding_model.fetch_node_and_edge_from_latent_dict(latent_dict, num_samples)
 
 
 # class GraphNetNoRecurrencyWrapper(NetworkWrapper):
@@ -516,7 +562,7 @@ class GraphNetWrapper(NetworkWrapper):
 #         return B, loss_dict, prd_traj
 
 
-def fetch_model_iterator(config: LayerConfig, args: Argument) -> NetworkWrapper:
+def fetch_model_iterator(config: LayerConfig, args: Namespace) -> NetworkWrapper:
     if args.model_type == ModelType.GraphNet:
         return GraphNetWrapper(config)
     # elif args.model_type == ModelType.GraphNetFullyConnected:

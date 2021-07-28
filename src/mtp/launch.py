@@ -95,11 +95,11 @@ def collect_all_json_files(root_dir: Path):
 def train_arg_modifier(args: Argument, user_args):
     args.CUDA_VISIBLE_DEVICES = user_args.gpu_index
     args.OMP_NUM_THREADS = 1
-    args.num_agent = user_args.num_agent
+    args.num_agents = user_args.num_agents
     args.seed = user_args.seed
     args.model_type = user_args.model_type
     args.beta = user_args.beta
-    if user_args.num_agent == 4:
+    if user_args.num_agents == 4:
         args.bsize = 20
         args.num_history = 5
         args.num_rollout = 15
@@ -109,11 +109,11 @@ def train_arg_modifier(args: Argument, user_args):
 def test_arg_modifier(args: Argument, user_args):
     args.CUDA_VISIBLE_DEVICES = -1
     args.OMP_NUM_THREADS = 1
-    args.num_agent = user_args.num_agent
+    args.num_agents = user_args.num_agents
     args.seed = user_args.seed
     args.model_type = user_args.model_type
     args.beta = user_args.beta
-    if user_args.num_agent == 4:
+    if user_args.num_agents == 4:
         args.bsize = 20
         args.num_history = 5
         args.num_rollout = 15
@@ -134,9 +134,9 @@ def visualize_single_row(out_dir: Path, index: int, item_dict: Dict[str, Any]):
 
     num_plot = len(item_dict['prd']) + 1
     fig, axl = plt.subplots(nrows=1, ncols=num_plot, figsize=(num_plot * 3, 3))
-    num_agent = tar_trajectory.shape[0]
+    num_agents = tar_trajectory.shape[0]
     tar_trajectory = np.concatenate((src_trajectory, tar_trajectory), axis=1)
-    for n in range(num_agent):
+    for n in range(num_agents):
         axl[0].scatter(tar_trajectory[n, :, 0], tar_trajectory[n, :, 1])
 
     for j, (item, ax) in enumerate(zip(item_dict['prd'], axl[1:])):
@@ -144,7 +144,7 @@ def visualize_single_row(out_dir: Path, index: int, item_dict: Dict[str, Any]):
         prd_winding = item['winding'].squeeze().cpu().detach().numpy()
         prd_trajectory = item['trajectory'].squeeze().cpu().detach().numpy()
         prd_trajectory = np.concatenate((src_trajectory, prd_trajectory), axis=1)
-        for n in range(num_agent):
+        for n in range(num_agents):
             ax.scatter(prd_trajectory[n, :, 0], prd_trajectory[n, :, 1])
             ax.set_title(str(frequency) + ', ' + ''.join([str(v) for v in prd_winding]))
             ax.grid()
@@ -188,7 +188,7 @@ def switch_modes():
     parser = ArgumentParser()
     parser.add_argument('mode', type=str)
     parser.add_argument('--model_str', type=str, default='')
-    parser.add_argument('--num_agent', type=int, default=2)
+    parser.add_argument('--num_agents', type=int, default=2)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--gpu_index', type=int, default=0)
     parser.add_argument('--beta', type=float, default=0.5)
@@ -198,7 +198,7 @@ def switch_modes():
     #     generate_loss_figure()
     if args.mode in ['train', 'eval']:
         args.model_type = fetch_model_type(args.model_str)
-        print(args.mode, args.model_type, args.num_agent, args.seed, args.beta)
+        print(args.mode, args.model_type, args.num_agents, args.seed, args.beta)
         func = train_agent if args.mode == 'train' else eval_agent
         func(args)
     else:

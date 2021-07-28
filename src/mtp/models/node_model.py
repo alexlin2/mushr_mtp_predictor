@@ -1,8 +1,9 @@
 import torch
 from torch.nn import Sequential as Seq, Linear, LayerNorm, ReLU, GRU, Module
 from torch_scatter import scatter_mean
+from torch import Tensor
 
-from ..models.model_base import reparameterize
+from ..models.model_base import reparameterize, batch_reparameterize
 
 
 class NodeModelBase(Module):
@@ -77,8 +78,19 @@ class ProbNodeModel(NodeModelBase):
         x = self.mlp_x(z)
         return x, z_mu, z_var
 
-    def fetch_node_from_latent_variable(self, z_mu, z_var):
-        z = reparameterize(z_mu, z_var)
+    def fetch_node_from_latent_variable(
+            self,
+            z_mu: Tensor,
+            z_var: Tensor,
+            num_samples: int):
+        """
+        Fetch the estimated node values from latent variables
+        :param z_mu: mean value, torch.float32, (batch_size * num_agents, dim_latent=20)
+        :param z_var: std value, torch.float32, (batch_size * num_agents, dim_latent=20)
+        :param num_samples: number of target samples
+        :return: node values, torch.float32, (batch_size * num_agents, num_samples, dim_node)
+        """
+        z = batch_reparameterize(z_mu, z_var, num_samples)
         return self.mlp_x(z)
 
 
