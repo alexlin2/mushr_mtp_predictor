@@ -9,7 +9,7 @@ import numpy as np
 import math
 
 WB = 0.295
-k = 0.4
+k = 0.6
 
 class state:
 
@@ -66,12 +66,12 @@ class PurePursuitController:
         return idx
 
     def pure_pursuit_steer_control(self, traj) -> tuple:
-        v = traj[-1,3]
+        v = traj[4,3]
         idx = self.search_target_index(v, traj)
         tar_x, tar_y = traj[idx, :2]
         alpha = np.arctan2(tar_y - self.car_pose.rear_y, tar_x - self.car_pose.rear_x) - self.car_pose.yaw
         delta = np.arctan2(2.0 * WB * np.sin(alpha) / self.Lf, 1.0)
-        print(alpha, delta)
+        print(v, delta)
         return v, delta
 
     def cb_pose(self, msg) -> None:

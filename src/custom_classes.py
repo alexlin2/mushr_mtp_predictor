@@ -201,8 +201,8 @@ class GraphNetPredictor:
                                                                     dim_goal)
         
                 
-                pred_goal = torch.tensor([[[1.,0.,0.,0.],[1.,0.,0.,0.]]]).to(self.trainer.device)
-                pred_winding = torch.tensor([[0.0,1.0],[1.0,0.0]]).to(self.trainer.device)
+                pred_goal = torch.tensor([[[1.,0.,0.,0.],[0.,0.,0.,1.]]]).to(self.trainer.device)
+                pred_winding = torch.tensor([[1.0,0.0],[0.0,1.0]]).to(self.trainer.device)
                 # pred_goal = pred_goal.expand(len(unique_samples), -1, -1).to(self.trainer.device)
                 # pred_goal_onehot = onehot_from_index(pred_goal, 4).unsqueeze(0)
                 # pred_winding_onehot = onehot_from_index(pred_winding, 2).unsqueeze(0)
