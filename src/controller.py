@@ -71,7 +71,7 @@ class PurePursuitController:
         tar_x, tar_y = traj[idx, :2]
         alpha = np.arctan2(tar_y - self.car_pose.rear_y, tar_x - self.car_pose.rear_x) - self.car_pose.yaw
         delta = np.arctan2(2.0 * WB * np.sin(alpha) / self.Lf, 1.0)
-        print(v, delta)
+        #print(v, delta)
         return v, delta
 
     def cb_pose(self, msg) -> None:

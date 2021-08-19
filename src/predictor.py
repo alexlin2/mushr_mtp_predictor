@@ -91,12 +91,15 @@ class PredictionNode:
 
     def run(self):
         if self.task_set and self.world.populated:
-            preds, probs = self.predictor.predict(self.world)
-            self.traj = preds[0,0]
+            preds, probs, goal = self.predictor.predict(self.world)
             idx, error = self.cost_function.apply(self.world, preds, probs)
             self.outputs.append((preds, probs))
-            _, idx = torch.sort(error)
-            viz_trajs_cmap(preds[:,0,:], error[idx], ns="result")
+            print(len(preds))
+       
+            if torch.count_nonzero(goal[:,0,2]) > 0:
+                self.traj = preds[idx, 0]
+            
+            viz_trajs_cmap(preds[:,0,:], error, ns="result")
             if self.check_task_complete():
                 return False
         return True

@@ -13,7 +13,7 @@ class Tracking:
         self.dtype = torch.FloatTensor
 
         self.NPOS = 4
-        self.lookahead = 14.0
+        self.lookahead = 1.0
         self._prev_pose = None
         self._prev_index = -1
         self._cache_thresh = 0.01
@@ -30,7 +30,7 @@ class Tracking:
         preds = torch.from_numpy(preds)
         ego_preds = preds[:, 0, :]
         errorcost = ego_preds[:, self.rollout_size - 1, :2].sub(torch.Tensor(waypoint[:2])).norm(dim=1).mul(self.error_w)
-        min_cost_id = torch.argmin(errorcost).item()
+        min_cost_id = torch.argmin(errorcost)
         return min_cost_id, errorcost
 
     def set_task(self, pathmsg):
