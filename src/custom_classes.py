@@ -189,6 +189,7 @@ class GraphNetPredictor:
             # tar = torch.cat((tar_goal, tar_winding), dim=-1)
 
             freq_list, sample_list = self.trainer.model_wrapper.eval_winding(curr_state)
+            print(sample_list)
 
             # for r, rows in enumerate(prd_cond):
             for item_index, (frequencies, unique_samples) in enumerate(zip(freq_list, sample_list)):
@@ -202,7 +203,7 @@ class GraphNetPredictor:
         
                 
                 # pred_goal = torch.tensor([[[1.,0.,0.,0.],[0.,0.,1.,0.]]]).to(self.trainer.device)
-                # pred_winding = torch.tensor([[1.0,0.0],[0.0,1.0]]).to(self.trainer.device)
+                # pred_winding = torch.tensor([[[1.0,0.0],[0.0,1.0]]]).to(self.trainer.device)
                 # pred_goal = pred_goal.expand(len(unique_samples), -1, -1).to(self.trainer.device)
                 # pred_goal_onehot = onehot_from_index(pred_goal, 4).unsqueeze(0)
                 # pred_winding_onehot = onehot_from_index(pred_winding, 2).unsqueeze(0)
@@ -223,7 +224,7 @@ class GraphNetPredictor:
             output_prd = np.array([x['prd']['trajectory'].cpu().numpy() for x in output])[0]
 
             probs = np.array([x['prd']['frequency'] for x in output])[0]
-            goals = np.array([x['prd']['goal'] for x in output])[0]
+            goals = np.array([x['prd']['goal'].cpu().numpy() for x in output])[0]
             #print(output_prd[0,0])
     
             if len(probs) > 0:

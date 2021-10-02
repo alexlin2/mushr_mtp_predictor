@@ -57,7 +57,7 @@ def fetch_test_intermediate_trajectory_path(num_agents: int, index: int) -> Path
 
 
 def fetch_root_dir() -> Path:
-    working_directory = '/home/alex/catkin_ws/src/mushr_mtp_predictor/src/'
+    working_directory = '/home/alexlin/catkin_ws/src/mushr_mtp_predictor/src/'
     return mkdir_if_not_exists(Path(working_directory) / '.gnn')
 
 

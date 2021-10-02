@@ -10,7 +10,7 @@ from parameters import RosParams
 
 from mushr_rhc_ros.srv import FollowPath
 from mushr_rhc_ros.msg import XYHVPath, XYHV
-from utils2.viz_traj import viz_trajs_cmap
+from utils2.viz_traj import viz_trajs_cmap, viz_path
 
 from mtp.argument import fetch_arguments
 from mtp.config import get_config_list
@@ -92,12 +92,12 @@ class PredictionNode:
     def run(self):
         if self.task_set and self.world.populated:
             preds, probs, goal = self.predictor.predict(self.world)
+            print(preds[:,0].shape)
             idx, error = self.cost_function.apply(self.world, preds, probs)
             self.outputs.append((preds, probs))
-            print(len(preds))
-       
-            if torch.count_nonzero(goal[:,0,2]) > 0:
-                self.traj = preds[idx, 0]
+            #print(len(preds))
+            self.traj = preds[idx, 0]
+            
             
             viz_trajs_cmap(preds[:,0,:], error, ns="result")
             if self.check_task_complete():
@@ -109,7 +109,8 @@ class PredictionNode:
         self.cost_function.set_task(path)
         self.task_set = True
         self.target_waypoint = np.array([path[-1].x,path[-1].y]) 
-        print("Path Set")
+        viz_path(path)
+        print("Path Set, target waypoint: " + str(self.target_waypoint))
         return True
 
     def check_task_complete(self):
